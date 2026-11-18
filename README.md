@@ -1,4 +1,5 @@
-#More vibecoded stuff
+# More vibecoded stuff
+If you don’t like vibecoded slop then don’t use it
 # WidgetForge
 
 Design your own Home Screen widgets from scratch. Lay out text, live clocks and dates,
