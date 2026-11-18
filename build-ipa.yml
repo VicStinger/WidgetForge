@@ -1,0 +1,181 @@
+# Builds WidgetForge.ipa on a GitHub-hosted Mac.
+#
+#   * No Mac, no Apple account and no secrets are needed.
+#   * The IPA is NOT signed for a phone. It is only ad-hoc signed so the App Group entitlement
+#     stays attached to it. Re-sign it with Sideloadly, AltStore, SideStore or your own
+#     certificate to install it on an iPhone or iPad.
+#
+# It starts by itself on every push, or run it by hand: GitHub > Actions > "Build IPA" > Run workflow.
+# (GitHub only shows that button once this file is on the repository's default branch.)
+
+name: Build IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Also attach the IPA to a GitHub Release (easier to download on a phone)"
+        type: boolean
+        default: false
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build WidgetForge.ipa
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # only used by the optional "Publish release" step
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+
+      - name: Find the Xcode project
+        run: |
+          PROJECT="$(find . -maxdepth 3 -name 'WidgetForge.xcodeproj' -type d | awk 'NR==1')"
+          if [ -z "$PROJECT" ]; then
+            echo "::error::WidgetForge.xcodeproj was not found. Upload the contents of the WidgetForge folder to the root of the repository."
+            exit 1
+          fi
+          echo "Using $PROJECT"
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$(dirname "$PROJECT")" >> "$GITHUB_ENV"
+
+      - name: Build (code signing off)
+        id: build
+        run: |
+          set -eo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme WidgetForge \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$GITHUB_WORKSPACE/build/xcodebuild.log"
+
+      - name: List the compiler errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          LOG="$GITHUB_WORKSPACE/build/xcodebuild.log"
+          {
+            echo "### The build failed"
+            echo
+            echo "Copy these lines when you ask for help. The full log is in the xcodebuild-log artifact."
+            echo
+            echo '```'
+            grep -E 'error:' "$LOG" | sed "s|$GITHUB_WORKSPACE/||" | awk '!seen[$0]++' | head -n 60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package the IPA
+        run: |
+          set -eo pipefail
+          BUILD="$GITHUB_WORKSPACE/build"
+          APP="$BUILD/DerivedData/Build/Products/Release-iphoneos/WidgetForge.app"
+          APPEX="$APP/PlugIns/WidgetForgeExtension.appex"
+          [ -d "$APP" ] || { echo "::error::WidgetForge.app was not produced"; exit 1; }
+          [ -d "$APPEX" ] || { echo "::error::The widget extension is missing from the app"; exit 1; }
+
+          # Work out the App Group identifier the way Xcode does.
+          SETTINGS="$(xcodebuild -project "$PROJECT" -target WidgetForge -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null || true)"
+          GROUP="$(printf '%s\n' "$SETTINGS" | awk -F' = ' '/^[[:space:]]*APP_GROUP_IDENTIFIER = / && !found { print $2; found = 1 }')"
+          if [ -z "$GROUP" ]; then
+            BUNDLE_ID="$(awk -F'=' '/^[[:space:]]*APP_BUNDLE_ID[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$PROJECT_DIR/Config/WidgetForge.xcconfig")"
+            GROUP="group.$BUNDLE_ID"
+          fi
+          echo "App Group: $GROUP"
+
+          # An unsigned build has no entitlements, so write the expanded ones and ad-hoc sign with them.
+          # Sideloading tools read the App Group from this signature when they re-sign the app.
+          ENT="$BUILD/entitlements"
+          mkdir -p "$ENT"
+          for NAME in WidgetForge WidgetForgeExtension; do
+            sed 's|[$](APP_GROUP_IDENTIFIER)|'"$GROUP"'|g' "$PROJECT_DIR/Resources/$NAME.entitlements" > "$ENT/$NAME.entitlements"
+          done
+          if grep -q '[$](' "$ENT"/*.entitlements; then
+            echo "::error::An entitlements file still contains an unexpanded build setting"
+            exit 1
+          fi
+
+          # Sign inside-out: the extension first, then the app that contains it.
+          codesign --force --sign - --timestamp=none --entitlements "$ENT/WidgetForgeExtension.entitlements" "$APPEX"
+          codesign --force --sign - --timestamp=none --entitlements "$ENT/WidgetForge.entitlements" "$APP"
+          codesign -d --entitlements :- "$APP" 2>&1 || true
+
+          # An IPA is a zip with the app inside a folder called Payload.
+          rm -rf "$BUILD/Payload" "$BUILD/WidgetForge.ipa"
+          mkdir -p "$BUILD/Payload"
+          ditto "$APP" "$BUILD/Payload/WidgetForge.app"
+          (cd "$BUILD" && zip -q -r -y -X WidgetForge.ipa Payload)
+          [ -s "$BUILD/WidgetForge.ipa" ] || { echo "::error::WidgetForge.ipa is empty"; exit 1; }
+          unzip -l "$BUILD/WidgetForge.ipa" > "$BUILD/ipa-contents.txt"
+          cat "$BUILD/ipa-contents.txt"
+
+          APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          EXT_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APPEX/Info.plist")"
+          SIZE="$(du -h "$BUILD/WidgetForge.ipa" | awk '{ print $1 }')"
+          {
+            echo "### WidgetForge.ipa is ready ($SIZE)"
+            echo
+            echo "- App bundle ID: $APP_ID"
+            echo "- Widget bundle ID: $EXT_ID"
+            echo "- App Group: $GROUP"
+            echo
+            echo "Download it from the Artifacts section below, then re-sign it with Sideloadly, AltStore or your own certificate."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WidgetForge-ipa
+          path: build/WidgetForge.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload the build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+
+      - name: Publish a release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="build-$GITHUB_RUN_NUMBER"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" build/WidgetForge.ipa --clobber
+          else
+            gh release create "$TAG" build/WidgetForge.ipa \
+              --target "$GITHUB_SHA" \
+              --title "WidgetForge $TAG" \
+              --notes "Built by GitHub Actions. The IPA is not signed for your device: re-sign it with Sideloadly, AltStore or your own certificate before installing." \
+              --prerelease
+          fi
