@@ -1,0 +1,122 @@
+name: Build Forge IPA
+
+# Builds an unsigned Forge-unsigned.ipa.
+# Put this file at .github/workflows/build-forge-ipa.yml in your repository, and either upload
+# Forge.zip (without unzipping it) to the repository root, or push the project folders themselves.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the project
+        run: |
+          ROOT=.
+          if [ -f Forge.zip ]; then
+            mkdir forge-src
+            unzip -q Forge.zip -d forge-src
+            ROOT=forge-src
+          fi
+          PROJECT=$(find "$ROOT" -maxdepth 4 -type d -name Forge.xcodeproj | sort | sed -n 1p)
+          if [ -z "$PROJECT" ]; then
+            echo "forge: error: Forge.xcodeproj was not found. Upload Forge.zip to the repository root without unzipping it." | tee build.log
+            exit 1
+          fi
+          echo "Using $PROJECT"
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Select newest stable Xcode
+        run: |
+          XCODE=$(python3 - <<'PY'
+          import glob, re
+          best = None
+          for path in glob.glob("/Applications/Xcode_*.app"):
+              m = re.fullmatch(r"/Applications/Xcode_(\d+(?:\.\d+)*)\.app", path)
+              if m:
+                  version = tuple(int(part) for part in m.group(1).split("."))
+                  if best is None or version > best[0]:
+                      best = (version, path)
+          print(best[1] if best else "")
+          PY
+          )
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE"
+          fi
+          xcodebuild -version
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme Forge \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package IPA
+        run: |
+          APP=$(find build -type d -name 'Forge.app' -path '*Release-iphoneos*' 2>/dev/null | sed -n 1p || true)
+          if [ -z "$APP" ]; then
+            echo "forge: error: The build finished but Forge.app was not produced." | tee -a build.log
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Forge-unsigned.ipa Payload
+
+      - name: Summarize
+        if: always()
+        run: |
+          touch build.log
+          grep -E ": (error|warning): " build.log | sort -u > errors.txt || true
+          {
+            echo "## Forge build: ${{ job.status }}"
+            echo
+            if grep -q ": error: " errors.txt; then
+              echo "Copy these errors and send them back to get them fixed:"
+              echo
+              echo '```'
+              grep ": error: " errors.txt | sed "s#/Users/runner/work/[^/]*/[^/]*/##" | sed -n '1,60p'
+              echo '```'
+            elif [ "${{ job.status }}" != "success" ]; then
+              echo "The build stopped before producing an IPA. The end of the log:"
+              echo
+              echo '```'
+              tail -n 40 build.log
+              echo '```'
+            else
+              echo "Download **Forge-unsigned-ipa** from the Artifacts section at the bottom of this page."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Forge-unsigned-ipa
+          path: Forge-unsigned.ipa
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            errors.txt
+            build.log
