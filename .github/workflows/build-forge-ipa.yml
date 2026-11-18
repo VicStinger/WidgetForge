@@ -21,14 +21,14 @@ jobs:
       - name: Find the project
         run: |
           ROOT=.
-          if [ -f Forge.zip ]; then
+          if [ -f WidgetForge.zip ]; then
             mkdir forge-src
-            unzip -q Forge.zip -d forge-src
+            unzip -q WidgedForge.zip -d forge-src
             ROOT=forge-src
           fi
-          PROJECT=$(find "$ROOT" -maxdepth 4 -type d -name Forge.xcodeproj | sort | sed -n 1p)
+          PROJECT=$(find "$ROOT" -maxdepth 4 -type d -name WidgetForge.xcodeproj | sort | sed -n 1p)
           if [ -z "$PROJECT" ]; then
-            echo "forge: error: Forge.xcodeproj was not found. Upload Forge.zip to the repository root without unzipping it." | tee build.log
+            echo "forge: error: Forge.xcodeproj was not found. Upload WidgetForge.zip to the repository root without unzipping it." | tee build.log
             exit 1
           fi
           echo "Using $PROJECT"
@@ -69,9 +69,9 @@ jobs:
 
       - name: Package IPA
         run: |
-          APP=$(find build -type d -name 'Forge.app' -path '*Release-iphoneos*' 2>/dev/null | sed -n 1p || true)
+          APP=$(find build -type d -name 'WidgetForge.app' -path '*Release-iphoneos*' 2>/dev/null | sed -n 1p || true)
           if [ -z "$APP" ]; then
-            echo "forge: error: The build finished but Forge.app was not produced." | tee -a build.log
+            echo "forge: error: The build finished but WidgetForge.app was not produced." | tee -a build.log
             exit 1
           fi
           rm -rf Payload
@@ -100,15 +100,15 @@ jobs:
               tail -n 40 build.log
               echo '```'
             else
-              echo "Download **Forge-unsigned-ipa** from the Artifacts section at the bottom of this page."
+              echo "Download **WidgetForge-unsigned-ipa** from the Artifacts section at the bottom of this page."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Forge-unsigned-ipa
-          path: Forge-unsigned.ipa
+          name: WidgetForge-unsigned-ipa
+          path: WidgetForge-unsigned.ipa
           compression-level: 0
           if-no-files-found: error
 
