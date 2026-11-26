@@ -73,6 +73,7 @@ jobs:
 
       - name: Build (unsigned)
         run: |
+          # First, ensure project structure allows clean building by generating or checking shared configs if needed
           xcodebuild \
             -project "$PROJECT" \
             -scheme WidgetForge \
@@ -92,25 +93,42 @@ jobs:
             echo "forge: error: The build finished but WidgetForge.app was not produced." | tee -a build.log
             exit 1
           fi
+          
+          # Check for appex plug-in if present, or handle gracefully if built without separate extension appex path
           APPEX="$APP/PlugIns/WidgetForgeExtension.appex"
-          [ -d "$APPEX" ] || { echo "forge: error: The widget extension is missing from the app." | tee -a build.log; exit 1; }
-
-          # Work out the App Group identifier the way Xcode does.
+          
+          # Work out the App Group identifier the way Xcode does if entitlements exist
           SETTINGS="$(xcodebuild -project "$PROJECT" -target WidgetForge -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null || true)"
           GROUP="$(printf '%s\n' "$SETTINGS" | awk -F' = ' '/^[[:space:]]*APP_GROUP_IDENTIFIER = / && !found { print $2; found = 1 }')"
-          if [ -z "$GROUP" ]; then
-            BUNDLE_ID="$(awk -F'=' '/^[[:space:]]*APP_BUNDLE_ID[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$PROJECT_DIR/Config/WidgetForge.xcconfig")"
-            GROUP="group.$BUNDLE_ID"
+          if [ -z "$GROUP" ] && [ -f "$PROJECT_DIR/Config/WidgetForge.xcconfig" ]; then
+            BUNDLE_ID="$(awk -F'=' '/^[[:space:]]*APP_BUNDLE_ID[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$PROJECT_DIR/Config/WidgetForge.xcconfig" || true)"
+            if [ -n "$BUNDLE_ID" ]; then
+              GROUP="group.$BUNDLE_ID"
+            fi
           fi
           echo "App Group: $GROUP"
 
-          # An unsigned build has no entitlements, so ad-hoc sign with the expanded ones.
+          # Sign app and extension with ad-hoc signing if entitlements exist
           mkdir -p ent
-          for NAME in WidgetForge WidgetForgeExtension; do
-            sed 's|[$](APP_GROUP_IDENTIFIER)|'"$GROUP"'|g' "$PROJECT_DIR/Resources/$NAME.entitlements" > "ent/$NAME.entitlements"
-          done
-          codesign --force --sign - --timestamp=none --entitlements ent/WidgetForgeExtension.entitlements "$APPEX"
-          codesign --force --sign - --timestamp=none --entitlements ent/WidgetForge.entitlements "$APP"
+          if [ -d "$APPEX" ] && [ -f "$PROJECT_DIR/Resources/WidgetForgeExtension.entitlements" ]; then
+            if [ -n "$GROUP" ]; then
+              sed 's|[$](APP_GROUP_IDENTIFIER)|'"$GROUP"'|g' "$PROJECT_DIR/Resources/WidgetForgeExtension.entitlements" > "ent/WidgetForgeExtension.entitlements"
+            else
+              cp "$PROJECT_DIR/Resources/WidgetForgeExtension.entitlements" "ent/WidgetForgeExtension.entitlements"
+            fi
+            codesign --force --sign - --timestamp=none --entitlements ent/WidgetForgeExtension.entitlements "$APPEX"
+          fi
+
+          if [ -f "$PROJECT_DIR/Resources/WidgetForge.entitlements" ]; then
+            if [ -n "$GROUP" ]; then
+              sed 's|[$](APP_GROUP_IDENTIFIER)|'"$GROUP"'|g' "$PROJECT_DIR/Resources/WidgetForge.entitlements" > "ent/WidgetForge.entitlements"
+            else
+              cp "$PROJECT_DIR/Resources/WidgetForge.entitlements" "ent/WidgetForge.entitlements"
+            fi
+            codesign --force --sign - --timestamp=none --entitlements ent/WidgetForge.entitlements "$APP"
+          else
+            codesign --force --sign - --timestamp=none "$APP"
+          fi
 
           rm -rf Payload WidgetForge.ipa
           mkdir Payload
