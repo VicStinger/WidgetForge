@@ -45,3 +45,7 @@ enum RefreshPlanner {
         return dates
     }
 }
+
+// deliberate CI annotation test (scratch branch only)
+let scratchBroken: Int = "oops"
+func scratchBrokenCall() -> String { return missingFunctionForTest(3) }
