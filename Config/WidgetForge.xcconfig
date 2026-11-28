@@ -1,0 +1,16 @@
+// WidgetForge build settings.
+// This is the only file you need to look at before pressing Run.
+//
+// 1) APP_BUNDLE_ID must be unique across all Apple developers, otherwise Xcode can't register
+//    it for your account. A random one is filled in below. Replace it with your own if you
+//    like (for example com.yourname.WidgetForge).
+//
+// 2) DEVELOPMENT_TEAM is optional here. Leave it empty and pick your team in Xcode instead:
+//    click each target > Signing & Capabilities > Team.
+
+APP_BUNDLE_ID = app.widgetforge.fac6074f
+DEVELOPMENT_TEAM =
+
+// The App Group is how the app hands your designs to the widget. It is derived from the
+// bundle identifier above, so you normally never touch it.
+APP_GROUP_IDENTIFIER = group.$(APP_BUNDLE_ID)

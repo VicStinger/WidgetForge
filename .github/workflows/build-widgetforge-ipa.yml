@@ -1,8 +1,8 @@
 name: Build WidgetForge IPA
 
 # Builds WidgetForge.ipa (not signed for a phone; re-sign it with Sideloadly, AltStore, etc.).
-# Put this file at .github/workflows/build-widgetforge-ipa.yml in your repository, and either upload
-# the project zip (without unzipping it) to the repository root, or push the project folders themselves.
+# Every push builds. Pushing a tag that starts with "v" (for example v2.1) also publishes a GitHub Release
+# with the IPA attached.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +17,11 @@ on:
   push:
     branches:
       - "**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-widgetforge-${{ github.ref }}
@@ -73,6 +78,7 @@ jobs:
 
       - name: Build (unsigned)
         run: |
+          set -o pipefail
           xcodebuild \
             -project "$PROJECT" \
             -scheme WidgetForge \
@@ -112,35 +118,29 @@ jobs:
           codesign --force --sign - --timestamp=none --entitlements ent/WidgetForgeExtension.entitlements "$APPEX"
           codesign --force --sign - --timestamp=none --entitlements ent/WidgetForge.entitlements "$APP"
 
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" 2>/dev/null || echo unknown)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "App version: $VERSION"
+
           rm -rf Payload WidgetForge.ipa
           mkdir Payload
           ditto "$APP" Payload/WidgetForge.app
           zip -q -r -y -X WidgetForge.ipa Payload
+          cp WidgetForge.ipa "WidgetForge-$VERSION.ipa"
+          ls -la WidgetForge*.ipa
+
+      - name: Self-test (logic checks, never blocks the IPA)
+        if: always() && hashFiles('Tests/SelfTest/main.swift') != ''
+        continue-on-error: true
+        run: |
+          mkdir -p selftest/samples
+          bash Tests/SelfTest/run.sh 2>&1 | tee selftest/driver.log
 
       - name: Summarize
         if: always()
         run: |
           touch build.log
-          grep -E ": (error|warning): " build.log | sort -u > errors.txt || true
-          {
-            echo "## WidgetForge build: ${{ job.status }}"
-            echo
-            if grep -q ": error: " errors.txt; then
-              echo "Copy these errors and send them back to get them fixed:"
-              echo
-              echo '```'
-              grep ": error: " errors.txt | sed "s#/Users/runner/work/[^/]*/[^/]*/##" | sed -n '1,60p'
-              echo '```'
-            elif [ "${{ job.status }}" != "success" ]; then
-              echo "The build stopped before producing an IPA. The end of the log:"
-              echo
-              echo '```'
-              tail -n 40 build.log
-              echo '```'
-            else
-              echo "Download **WidgetForge-ipa** from the Artifacts section at the bottom of this page."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/ci_report.py "${{ job.status }}" || true
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -158,3 +158,16 @@ jobs:
           path: |
             errors.txt
             build.log
+            selftest/*.log
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NOTES="RELEASE_NOTES.md"
+          [ -f "$NOTES" ] || echo "WidgetForge $VERSION" > "$NOTES"
+          gh release create "$TAG" "WidgetForge-$VERSION.ipa" --title "WidgetForge $VERSION" --notes-file "$NOTES" --latest \
+            || gh release upload "$TAG" "WidgetForge-$VERSION.ipa" --clobber
